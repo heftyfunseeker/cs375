@@ -16,13 +16,18 @@ static const int MAX_EDGES_PER_STATE     = 8;
 static const char DEFAULT_EDGE_CONDITION = CHAR_MAX;
 
 class DfaState;
+struct DfaEdge;
+
 static DfaState * s_states = nullptr;
 static int s_stateIndex    = 0;
+
+typedef bool (*EdgeCondition)(const DfaEdge * edge,  char c);
 
 //=========================================================
 struct DfaEdge {
     DfaState * m_state;
-    char m_condition;
+    EdgeCondition m_condition;
+    char m_simpleCondition;
 };
 
 //=========================================================
@@ -30,7 +35,7 @@ struct DfaEdge {
 class DfaState {
 public:
     DfaEdge m_edges[MAX_EDGES_PER_STATE];
-    
+
     // only one default edge per state
     DfaEdge m_defaultEdge;
 
@@ -53,39 +58,61 @@ struct DfaTokenReader {
 //
 
 //=========================================================
-static void InternalAddEdge(DfaState * from, DfaState * to, char c) {
+static bool SimpleEdgeCondition (const DfaEdge * edge, char c) {
+    return edge->m_simpleCondition == c;
+}
+
+//=========================================================
+static bool WhiteSpaceEdgeCondition (const DfaEdge * edge, char c) {
+    return  c == ' '  ||
+            c == '\r' ||
+            c == '\n' ||
+            c == '\t';
+}
+
+//=========================================================
+static bool AlphaEdgeCondition (const DfaEdge * edge, char c) {
+    return c >= 'a' && c <= 'z' ||
+           c >= 'A' && c <= 'Z';
+}
+
+//=========================================================
+static bool IntegerEdgeCondition (const DfaEdge * edge, char c) {
+    return c >= '0' && c <= '9';
+}
+
+//=========================================================
+static void InternalAddEdge(DfaState * from, DfaState * to, char c, EdgeCondition condition) {
     assert(from->m_edgeCount < MAX_EDGES_PER_STATE);
-    DfaEdge * edge; 
+    DfaEdge * edge;
     if (c == DEFAULT_EDGE_CONDITION) {
+        // make sure we haven't defined a default edge already
+        assert(!from->m_defaultEdge.m_state);
         edge = &from->m_defaultEdge;
     }
     else {
         edge = &from->m_edges[from->m_edgeCount++];
     }
-    edge->m_condition = c;
+    edge->m_simpleCondition = c;
     edge->m_state = to;
+    edge->m_condition = condition ? condition : &SimpleEdgeCondition;
 }
 
 //=========================================================
 static void InternalResetEdge (DfaEdge * edge) {
     edge->m_condition = 0;
     edge->m_state = nullptr;
+    edge->m_simpleCondition = 0;
 }
 
 //=========================================================
 static void InternalDeleteStateAndChildren (DfaState * state, DfaState *& newRoot) {
-    if (state->m_edgeCount == 0) {
-        state->m_accepting = false;
-        state->m_tokenType = (TokenType::Enum) 0;
-    }
-    else {
-        while (state->m_edgeCount > 0) {
-            DfaEdge * edge = &state->m_edges[--state->m_edgeCount];
-            if (edge->m_state != state) {
-                InternalDeleteStateAndChildren(edge->m_state, newRoot);
-            }
-            InternalResetEdge(edge);
+    while (state->m_edgeCount > 0) {
+        DfaEdge * edge = &state->m_edges[--state->m_edgeCount];
+        if (edge->m_state != state) {
+            InternalDeleteStateAndChildren(edge->m_state, newRoot);
         }
+        InternalResetEdge(edge);
     }
     if (state->m_defaultEdge.m_state) {
         if (state->m_defaultEdge.m_state != state) {
@@ -93,11 +120,19 @@ static void InternalDeleteStateAndChildren (DfaState * state, DfaState *& newRoo
         }
         InternalResetEdge(&state->m_defaultEdge);
     }
+    state->m_accepting = false;
+    state->m_tokenType = (TokenType::Enum) 0;
     newRoot = state;
 }
 
 //=========================================================
-static void InternalReadToken (DfaTokenReader * reader, DfaState * state, int streamOffset) {
+static void InternalParseToken (DfaTokenReader * reader, DfaState * state, int streamOffset) {
+    // save position if this state is accepting
+    if (state->m_accepting) {
+        reader->m_lastAcceptingState = state;
+        reader->m_lastAcceptingPosition = reader->m_stream + streamOffset;
+    }
+
     if (*(reader->m_stream + streamOffset) == '\0') {
         if (!reader->m_lastAcceptingPosition) {
             reader->m_lastAcceptingPosition = reader->m_stream + streamOffset;
@@ -105,29 +140,42 @@ static void InternalReadToken (DfaTokenReader * reader, DfaState * state, int st
         return;
     }
 
-    // save position if this state is accepting
-    if (state->m_accepting) {
-        reader->m_lastAcceptingState = state;
-        reader->m_lastAcceptingPosition = reader->m_stream + streamOffset;
-    }
-
     // look at outgoing edges to find next match
     for (int edgeIndex = 0; edgeIndex < state->m_edgeCount; ++edgeIndex) {
         DfaEdge * edge = &state->m_edges[edgeIndex];
-        if (edge->m_condition == *(reader->m_stream + streamOffset)) {
-            InternalReadToken(reader, edge->m_state, streamOffset + 1);
+        char c = *(reader->m_stream + streamOffset);
+        if (edge->m_condition(edge, c)) {
+            InternalParseToken(reader, edge->m_state, streamOffset + 1);
         }
     }
 
     // if we didn't find an edge, see if we have a default edge and check that
     if (!reader->m_lastAcceptingState && state->m_defaultEdge.m_state) {
-        assert(state->m_defaultEdge.m_condition == DEFAULT_EDGE_CONDITION);
-        InternalReadToken(reader, state->m_defaultEdge.m_state, streamOffset + 1);
+        assert(state->m_defaultEdge.m_condition(&state->m_defaultEdge, DEFAULT_EDGE_CONDITION));
+        InternalParseToken(reader, state->m_defaultEdge.m_state, streamOffset + 1);
     }
 
     if (!reader->m_lastAcceptingPosition) {
         reader->m_lastAcceptingPosition = reader->m_stream + streamOffset;
     }
+}
+
+//=========================================================
+void InternalReadToken(DfaState * startingState, const char * stream, Token & outToken) {
+    outToken.mTokenType = 0;
+
+    DfaTokenReader reader;
+    reader.m_stream                = stream;
+    reader.m_lastAcceptingState    = nullptr;
+    reader.m_lastAcceptingPosition = nullptr;
+
+    InternalParseToken(&reader, startingState, 0);
+
+    if (reader.m_lastAcceptingState) {
+        outToken.mTokenType = reader.m_lastAcceptingState->m_tokenType;
+    }
+    outToken.mText   = reader.m_stream;
+    outToken.mLength = reader.m_lastAcceptingPosition - reader.m_stream;
 }
 
 //=========================================================
@@ -153,31 +201,18 @@ DfaState * AddState (int acceptingToken) {
 //=========================================================
 void AddEdge (DfaState * from, DfaState * to, char c) {
     assert(from && to && c != DEFAULT_EDGE_CONDITION);
-    InternalAddEdge(from, to, c);
+    InternalAddEdge(from, to, c, nullptr);
 }
 
 //=========================================================
 void AddDefaultEdge (DfaState * from, DfaState * to) {
     assert(from && to);
-    InternalAddEdge(from, to, DEFAULT_EDGE_CONDITION);
+    InternalAddEdge(from, to, DEFAULT_EDGE_CONDITION, nullptr);
 }
 
 //=========================================================
 void ReadToken(DfaState * startingState, const char * stream, Token & outToken) {
-    outToken.mTokenType = 0;
-
-    DfaTokenReader reader;
-    reader.m_stream                = stream;
-    reader.m_lastAcceptingState    = nullptr;
-    reader.m_lastAcceptingPosition = nullptr;
-
-    InternalReadToken(&reader, startingState, 0);
-
-    if (reader.m_lastAcceptingState) {
-        outToken.mTokenType = reader.m_lastAcceptingState->m_tokenType;
-    }
-    outToken.mText   = reader.m_stream;
-    outToken.mLength = reader.m_lastAcceptingPosition - reader.m_stream;
+    InternalReadToken(startingState, stream, outToken);
 }
 
 //=========================================================
@@ -192,11 +227,29 @@ void DeleteStateAndChildren (DfaState * root) {
 
 //=========================================================
 void ReadLanguageToken(DfaState * startingState, const char * stream, Token & outToken) {
-
+    InternalReadToken(startingState, stream, outToken);
 }
 
 //=========================================================
-DfaState* CreateLanguageDfa()
-{
-  return nullptr;
+DfaState* CreateLanguageDfa() {
+    DfaState * root = AddState(NOT_ACCEPTING);
+    DfaState * whiteSpace = AddState(TokenType::Whitespace);
+    DfaState * identifier = AddState(TokenType::Identifier);
+
+    // root to whitespace
+    InternalAddEdge(root, whiteSpace, 0, WhiteSpaceEdgeCondition);
+
+    // define whitespace edges
+    InternalAddEdge(whiteSpace, whiteSpace, 0, WhiteSpaceEdgeCondition);
+
+    // root to identifier
+    InternalAddEdge(root, identifier, 0, AlphaEdgeCondition);
+    InternalAddEdge(root, identifier, '_', nullptr);
+
+    // define identifier edges
+    InternalAddEdge(identifier, identifier, 0, AlphaEdgeCondition);
+    InternalAddEdge(identifier, identifier, '_', nullptr);
+    InternalAddEdge(identifier, identifier, 0, IntegerEdgeCondition);
+
+    return root;
 }
