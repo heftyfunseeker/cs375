@@ -99,7 +99,9 @@ static void InternalDeleteStateAndChildren (DfaState * state, DfaState *& newRoo
 //=========================================================
 static void InternalReadToken (DfaTokenReader * reader, DfaState * state, int streamOffset) {
     if (*(reader->m_stream + streamOffset) == '\0') {
-        reader->m_lastAcceptingPosition = reader->m_stream + streamOffset;
+        if (!reader->m_lastAcceptingPosition) {
+            reader->m_lastAcceptingPosition = reader->m_stream + streamOffset;
+        }
         return;
     }
 
