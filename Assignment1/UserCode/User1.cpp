@@ -12,8 +12,8 @@
 //
 
 static const int NOT_ACCEPTING           = 0;
-static const int MAX_STATES              = 2048;
-static const int MAX_EDGES_PER_STATE     = 32;
+static const int MAX_STATES              = 512;
+static const int MAX_EDGES               = 2048;
 static const char DEFAULT_EDGE_CONDITION = CHAR_MAX;
 
 class DfaState;
@@ -21,6 +21,8 @@ struct DfaEdge;
 
 static DfaState * s_states = nullptr;
 static int s_stateIndex    = 0;
+static DfaEdge * s_edges = nullptr;
+static int s_edgeIndex = 0;
 
 typedef bool (*EdgeCondition)(const DfaEdge * edge,  char c);
 
@@ -34,6 +36,7 @@ const char * s_tokenSymbols[] = {
 //=========================================================
 struct DfaEdge {
     DfaState * m_state;
+    DfaEdge * m_nextSibling;
     EdgeCondition m_condition;
     char m_simpleCondition;
 };
@@ -42,13 +45,10 @@ struct DfaEdge {
 // external code is forward declaring with class
 class DfaState {
 public:
-    DfaEdge m_edges[MAX_EDGES_PER_STATE];
+    DfaEdge * m_edge;
 
     // only one default edge per state
-    DfaEdge m_defaultEdge;
-
-    // does not include default edge
-    int m_edgeCount;
+    DfaEdge * m_defaultEdge;
 
     TokenType::Enum m_tokenType;
     bool m_accepting;
@@ -99,15 +99,26 @@ static bool EscapedCharEdgeCondition (const DfaEdge * edge, char c) {
 
 //=========================================================
 static void InternalAddEdge (DfaState * from, DfaState * to, char c, EdgeCondition condition) {
-    assert(from->m_edgeCount < MAX_EDGES_PER_STATE);
-    DfaEdge * edge;
+    assert(s_edgeIndex < MAX_EDGES);
+    if (!s_edges) {
+        static DfaEdge edges[MAX_EDGES];
+        s_edges = edges;
+        memset(s_edges, 0, sizeof(s_edges) / sizeof(s_edges[0]));
+    }
+
+    // link new edge in state
+    DfaEdge * edge = &s_edges[s_edgeIndex++];
     if (c == DEFAULT_EDGE_CONDITION) {
         // make sure we haven't defined a default edge already
-        assert(!from->m_defaultEdge.m_state);
-        edge = &from->m_defaultEdge;
+        assert(!from->m_defaultEdge);
+        from->m_defaultEdge = edge;
     }
     else {
-        edge = &from->m_edges[from->m_edgeCount++];
+        DfaEdge ** curr = &from->m_edge;
+        while (*curr) {
+            curr = &(*curr)->m_nextSibling;
+        }
+        *curr = edge;
     }
     edge->m_simpleCondition = c;
     edge->m_state = to;
@@ -119,22 +130,25 @@ static void InternalResetEdge (DfaEdge * edge) {
     edge->m_condition = 0;
     edge->m_state = nullptr;
     edge->m_simpleCondition = 0;
+    edge->m_nextSibling = nullptr;
 }
 
 //=========================================================
 static void InternalDeleteStateAndChildren (DfaState * state, DfaState *& newRoot) {
-    while (state->m_edgeCount > 0) {
-        DfaEdge * edge = &state->m_edges[--state->m_edgeCount];
-        if (edge->m_state != state) {
-            InternalDeleteStateAndChildren(edge->m_state, newRoot);
+    DfaEdge ** curr = &state->m_edge;
+    while (*curr) {
+        if ((*curr)->m_state != state) {
+            InternalDeleteStateAndChildren((*curr)->m_state, newRoot);
         }
-        InternalResetEdge(edge);
+        InternalResetEdge(*curr);
+        *curr = nullptr;
     }
-    if (state->m_defaultEdge.m_state) {
-        if (state->m_defaultEdge.m_state != state) {
-            InternalDeleteStateAndChildren(state->m_defaultEdge.m_state, newRoot);
+    if (state->m_defaultEdge) {
+        if (state->m_defaultEdge->m_state != state) {
+            InternalDeleteStateAndChildren(state->m_defaultEdge->m_state, newRoot);
         }
-        InternalResetEdge(&state->m_defaultEdge);
+        InternalResetEdge(state->m_defaultEdge);
+        state->m_defaultEdge = nullptr;
     }
     state->m_accepting = false;
     state->m_tokenType = (TokenType::Enum) 0;
@@ -158,8 +172,8 @@ static void InternalParseToken (DfaTokenReader * reader, DfaState * state, int s
 
     // look at outgoing edges to find next match
     bool error = false;
-    for (int edgeIndex = 0; edgeIndex < state->m_edgeCount; ++edgeIndex) {
-        DfaEdge * edge = &state->m_edges[edgeIndex];
+    DfaEdge * edge = state->m_edge;
+    while (edge) {
         char c = *(reader->m_stream + streamOffset);
         if (edge->m_condition(edge, c)) {
             InternalParseToken(reader, edge->m_state, streamOffset + 1);
@@ -167,12 +181,13 @@ static void InternalParseToken (DfaTokenReader * reader, DfaState * state, int s
                 error = true;
             }
         }
+        edge = edge->m_nextSibling;
     }
 
     // if we didn't find an edge, see if we have a default edge and check that
-    if (!reader->m_lastAcceptingState && state->m_defaultEdge.m_state && !error) {
-        assert(state->m_defaultEdge.m_condition(&state->m_defaultEdge, DEFAULT_EDGE_CONDITION));
-        InternalParseToken(reader, state->m_defaultEdge.m_state, streamOffset + 1);
+    if (!reader->m_lastAcceptingState && state->m_defaultEdge && !error) {
+        assert(state->m_defaultEdge->m_condition(state->m_defaultEdge, DEFAULT_EDGE_CONDITION));
+        InternalParseToken(reader, state->m_defaultEdge->m_state, streamOffset + 1);
     }
 
     if (!reader->m_tokenLength) {
@@ -214,7 +229,7 @@ DfaState * AddState (int acceptingToken) {
     DfaState * state = &s_states[s_stateIndex++];
     state->m_accepting = acceptingToken != NOT_ACCEPTING;
     state->m_tokenType = (TokenType::Enum)acceptingToken;
-    state->m_edgeCount = 0;
+    state->m_edge = nullptr;
 
     return state;
 }
@@ -242,8 +257,8 @@ void DeleteStateAndChildren (DfaState * root) {
     InternalDeleteStateAndChildren(root, newRoot);
 
     // see if we get back to the beginning of our pool
-    assert(newRoot == s_states);
-    s_stateIndex = 0;
+    s_stateIndex = newRoot - s_states;
+    assert(s_stateIndex == 0);
 }
 
 //=========================================================
@@ -333,7 +348,7 @@ DfaState* CreateLanguageDfa() {
     AddDefaultEdge(charLiteralStart, charLiteralStart);
 
     // multiline comment
-    DfaState * divisionState = symbolStates[s_tokenSymbols[TokenType::SymbolStart - TokenType::Divide - 1]];
+    DfaState * divisionState = symbolStates[s_tokenSymbols[TokenType::Divide - TokenType::SymbolStart - 1]];
     DfaState * mlcStart = AddState(NOT_ACCEPTING);
     DfaState * mlcStarFinder = AddState(NOT_ACCEPTING);
     InternalAddEdge(divisionState, mlcStart, '*', nullptr);
