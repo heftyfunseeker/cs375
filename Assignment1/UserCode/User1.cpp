@@ -12,8 +12,8 @@
 //
 
 static const int NOT_ACCEPTING           = 0;
-static const int MAX_STATES              = 2048;
-static const int MAX_EDGES               = 2048;
+static const int MAX_STATES              = 512;
+static const int MAX_EDGES               = 1024;
 static const char DEFAULT_EDGE_CONDITION = CHAR_MAX;
 
 class DfaState;
@@ -57,7 +57,7 @@ public:
     // only one default edge per state
     DfaEdge * m_defaultEdge;
 
-    TokenType::Enum m_tokenType;
+    unsigned int m_tokenType;
     bool m_accepting;
 };
 
@@ -66,6 +66,8 @@ struct DfaTokenReader {
     const char * m_stream;
     int m_tokenLength;
     DfaState * m_lastAcceptingState;
+    DfaState * m_nextAcceptingState;
+    bool m_error;
 };
 
 //=========================================================
@@ -98,9 +100,9 @@ static bool IntegerEdgeCondition (const DfaEdge * edge, char c) {
 
 //=========================================================
 static bool EscapedCharEdgeCondition (const DfaEdge * edge, char c) {
-    return  c == '\n' ||
-            c == '\r' ||
-            c == '\t' ||
+    return  c == 'n' ||
+            c == 'r' ||
+            c == 't' ||
             c == '\"';
 }
 
@@ -173,6 +175,9 @@ static void InternalDeleteStateAndChildren (DfaState * state, DfaState *& newRoo
 static void InternalParseToken (DfaTokenReader * reader, DfaState * state, int streamOffset) {
     // save position if this state is accepting
     if (state->m_accepting) {
+        // this is a signal to previous callers
+        reader->m_nextAcceptingState = state;
+
         reader->m_lastAcceptingState = state;
         reader->m_tokenLength = streamOffset;
     }
@@ -186,25 +191,28 @@ static void InternalParseToken (DfaTokenReader * reader, DfaState * state, int s
 
     // look at outgoing edges to find next match
     DfaEdge * edge = state->m_edge;
-    bool error = false;
+    bool foundEdge = false;
     while (edge) {
         char c = *(reader->m_stream + streamOffset);
         if (edge->m_condition(edge, c)) {
+            reader->m_nextAcceptingState = nullptr;
             InternalParseToken(reader, edge->m_state, streamOffset + 1);
-            if (!reader->m_lastAcceptingState) {
-                error = true;
+            if (!reader->m_nextAcceptingState) {
+                reader->m_error = true;
             }
+            foundEdge = true;
+            break;
         }
         edge = edge->m_nextSibling;
     }
 
     // if we didn't find an edge, see if we have a default edge and check that
-    if (!reader->m_lastAcceptingState && state->m_defaultEdge && error) {
+    if (state->m_defaultEdge && !reader->m_error && !foundEdge) {
         assert(state->m_defaultEdge->m_condition(state->m_defaultEdge, DEFAULT_EDGE_CONDITION));
         InternalParseToken(reader, state->m_defaultEdge->m_state, streamOffset + 1);
     }
 
-    if (!reader->m_lastAcceptingState) {
+    if (!reader->m_tokenLength) {
         reader->m_tokenLength = streamOffset;
     }
 }
@@ -217,6 +225,8 @@ void InternalReadToken(DfaState * startingState, const char * stream, Token & ou
     reader.m_stream                = stream;
     reader.m_lastAcceptingState    = nullptr;
     reader.m_tokenLength = 0;
+    reader.m_error = false;
+    reader.m_nextAcceptingState = nullptr;
 
     InternalParseToken(&reader, startingState, 0);
 
@@ -248,7 +258,7 @@ DfaState * AddState (int acceptingToken) {
 
     DfaState * state = &s_states[s_stateIndex++];
     state->m_accepting = acceptingToken != NOT_ACCEPTING;
-    state->m_tokenType = (TokenType::Enum)acceptingToken;
+    state->m_tokenType = acceptingToken;
     state->m_edge = nullptr;
 
     return state;
@@ -277,6 +287,7 @@ void DeleteStateAndChildren (DfaState * root) {
     InternalDeleteStateAndChildren(root, newRoot);
 
     // see if we get back to the beginning of our pool
+    // could just zero memory...
     s_stateIndex = newRoot - s_states;
     assert(s_stateIndex == 0);
     s_keywordToId.clear();
@@ -353,11 +364,11 @@ DfaState* CreateLanguageDfa() {
 
     // string literal
     DfaState * stringLiteralStart = AddState(NOT_ACCEPTING);
-    DfaState * dummy = AddState(NOT_ACCEPTING);
     InternalAddEdge(root, stringLiteralStart, '"', nullptr);
     InternalAddEdge(stringLiteralStart, stringLiteral, '"', nullptr);
-    InternalAddEdge(stringLiteralStart, dummy, '\\', nullptr);
-    InternalAddEdge(stringLiteralStart, stringLiteralStart, 0, EscapedCharEdgeCondition);
+    DfaState * slEscaped = AddState(NOT_ACCEPTING);
+    InternalAddEdge(stringLiteralStart, slEscaped, '\\', nullptr);
+    InternalAddEdge(slEscaped, stringLiteralStart, 0, EscapedCharEdgeCondition);
     AddDefaultEdge(stringLiteralStart, stringLiteralStart);
 
     // char literal
