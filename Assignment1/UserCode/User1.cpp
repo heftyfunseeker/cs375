@@ -12,7 +12,7 @@
 //
 
 static const int NOT_ACCEPTING           = 0;
-static const int MAX_STATES              = 512;
+static const int MAX_STATES              = 2048;
 static const int MAX_EDGES               = 2048;
 static const char DEFAULT_EDGE_CONDITION = CHAR_MAX;
 
@@ -23,13 +23,20 @@ static DfaState * s_states = nullptr;
 static int s_stateIndex    = 0;
 static DfaEdge * s_edges = nullptr;
 static int s_edgeIndex = 0;
+static std::map<std::string, unsigned> s_keywordToId;
 
 typedef bool (*EdgeCondition)(const DfaEdge * edge,  char c);
 
-const char * s_tokenSymbols[] = {
-  #define TOKEN(Name, Value) Value,
-  #include "../Drivers/TokenSymbols.inl"
-  #undef TOKEN
+static const char * s_tokenSymbols[] = {
+    #define TOKEN(Name, Value) Value,
+    #include "../Drivers/TokenSymbols.inl"
+    #undef TOKEN
+};
+
+static const char * s_tokenKeywords[] = {
+    #define TOKEN(Name, Value) Value,
+    #include "../Drivers/TokenKeywords.inl"
+    #undef TOKEN
 };
 
 
@@ -91,10 +98,17 @@ static bool IntegerEdgeCondition (const DfaEdge * edge, char c) {
 
 //=========================================================
 static bool EscapedCharEdgeCondition (const DfaEdge * edge, char c) {
-    return  c == 'n' ||
-            c == 'r' ||
-            c == 't' ||
-            c == '"';
+    return  c == '\n' ||
+            c == '\r' ||
+            c == '\t' ||
+            c == '\"';
+}
+
+//=========================================================
+static bool EndOfLineEdgeCondition(const DfaEdge * edge, char c) {
+    return  c == '\n' ||
+            c == '\r' ||
+            c == '\0';
 }
 
 //=========================================================
@@ -171,8 +185,8 @@ static void InternalParseToken (DfaTokenReader * reader, DfaState * state, int s
     }
 
     // look at outgoing edges to find next match
-    bool error = false;
     DfaEdge * edge = state->m_edge;
+    bool error = false;
     while (edge) {
         char c = *(reader->m_stream + streamOffset);
         if (edge->m_condition(edge, c)) {
@@ -185,12 +199,12 @@ static void InternalParseToken (DfaTokenReader * reader, DfaState * state, int s
     }
 
     // if we didn't find an edge, see if we have a default edge and check that
-    if (!reader->m_lastAcceptingState && state->m_defaultEdge && !error) {
+    if (!reader->m_lastAcceptingState && state->m_defaultEdge && error) {
         assert(state->m_defaultEdge->m_condition(state->m_defaultEdge, DEFAULT_EDGE_CONDITION));
         InternalParseToken(reader, state->m_defaultEdge->m_state, streamOffset + 1);
     }
 
-    if (!reader->m_tokenLength) {
+    if (!reader->m_lastAcceptingState) {
         reader->m_tokenLength = streamOffset;
     }
 }
@@ -208,6 +222,12 @@ void InternalReadToken(DfaState * startingState, const char * stream, Token & ou
 
     if (reader.m_lastAcceptingState) {
         outToken.mTokenType = reader.m_lastAcceptingState->m_tokenType;
+        if (reader.m_lastAcceptingState->m_tokenType == TokenType::Identifier) {
+            std::string id(reader.m_stream, reader.m_tokenLength);
+            if (s_keywordToId.count(id)) {
+                outToken.mTokenType = s_keywordToId[id];
+            }
+        }
     }
     outToken.mText   = reader.m_stream;
     outToken.mLength = reader.m_tokenLength;
@@ -259,6 +279,7 @@ void DeleteStateAndChildren (DfaState * root) {
     // see if we get back to the beginning of our pool
     s_stateIndex = newRoot - s_states;
     assert(s_stateIndex == 0);
+    s_keywordToId.clear();
 }
 
 //=========================================================
@@ -313,6 +334,7 @@ DfaState* CreateLanguageDfa() {
     DfaState * stringLiteral = AddState(TokenType::StringLiteral);
     DfaState * charLiteral = AddState(TokenType::CharacterLiteral);
     DfaState * multiComment = AddState(TokenType::MultiLineComment);
+    DfaState * singleComment = AddState(TokenType::SingleLineComment);
 
     // integer
     InternalAddEdge(root, integerLiteral, 0, IntegerEdgeCondition);
@@ -331,11 +353,11 @@ DfaState* CreateLanguageDfa() {
 
     // string literal
     DfaState * stringLiteralStart = AddState(NOT_ACCEPTING);
+    DfaState * dummy = AddState(NOT_ACCEPTING);
     InternalAddEdge(root, stringLiteralStart, '"', nullptr);
     InternalAddEdge(stringLiteralStart, stringLiteral, '"', nullptr);
-    DfaState * slEscaped = AddState(NOT_ACCEPTING);
-    InternalAddEdge(stringLiteralStart, slEscaped, '\\', nullptr);
-    InternalAddEdge(slEscaped, stringLiteralStart, 0, EscapedCharEdgeCondition);
+    InternalAddEdge(stringLiteralStart, dummy, '\\', nullptr);
+    InternalAddEdge(stringLiteralStart, stringLiteralStart, 0, EscapedCharEdgeCondition);
     AddDefaultEdge(stringLiteralStart, stringLiteralStart);
 
     // char literal
@@ -357,6 +379,12 @@ DfaState* CreateLanguageDfa() {
     AddDefaultEdge(mlcStarFinder, mlcStart);
     AddDefaultEdge(mlcStart, mlcStart);
 
+    // singleline comment
+    DfaState * slcStart = AddState(NOT_ACCEPTING);
+    InternalAddEdge(divisionState, slcStart, '/', nullptr);
+    InternalAddEdge(slcStart, singleComment, 0, EndOfLineEdgeCondition);
+    AddDefaultEdge(slcStart, slcStart);
+
     // whitespace
     InternalAddEdge(root, whiteSpace, 0, WhiteSpaceEdgeCondition);
     InternalAddEdge(whiteSpace, whiteSpace, 0, WhiteSpaceEdgeCondition);
@@ -368,6 +396,11 @@ DfaState* CreateLanguageDfa() {
     InternalAddEdge(identifier, identifier, 0, AlphaEdgeCondition);
     InternalAddEdge(identifier, identifier, '_', nullptr);
     InternalAddEdge(identifier, identifier, 0, IntegerEdgeCondition);
+
+    // parse keywords
+    for (unsigned i = 0; i < sizeof(s_tokenKeywords) / sizeof(s_tokenKeywords[0]); ++i) {
+        s_keywordToId[s_tokenKeywords[i]] = TokenType::KeywordStart + 1 + i;
+    }
 
     return root;
 }
