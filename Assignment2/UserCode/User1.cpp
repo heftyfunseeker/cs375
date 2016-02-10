@@ -125,7 +125,6 @@ static void InternalAddEdge (DfaState * from, DfaState * to, char c, EdgeConditi
     // link new edge in state
     DfaEdge * edge = &s_edges[s_edgeIndex++];
     if (c == DEFAULT_EDGE_CONDITION) {
-        // make sure we haven't defined a default edge already
         assert(!from->m_defaultEdge);
         from->m_defaultEdge = edge;
     }
@@ -147,28 +146,6 @@ static void InternalResetEdge (DfaEdge * edge) {
     edge->m_state = nullptr;
     edge->m_simpleCondition = 0;
     edge->m_nextSibling = nullptr;
-}
-
-//=========================================================
-static void InternalDeleteStateAndChildren (DfaState * state, DfaState *& newRoot) {
-    DfaEdge ** curr = &state->m_edge;
-    while (*curr) {
-        if ((*curr)->m_state != state) {
-            InternalDeleteStateAndChildren((*curr)->m_state, newRoot);
-        }
-        InternalResetEdge(*curr);
-        *curr = nullptr;
-    }
-    if (state->m_defaultEdge) {
-        if (state->m_defaultEdge->m_state != state) {
-            InternalDeleteStateAndChildren(state->m_defaultEdge->m_state, newRoot);
-        }
-        InternalResetEdge(state->m_defaultEdge);
-        state->m_defaultEdge = nullptr;
-    }
-    state->m_accepting = false;
-    state->m_tokenType = (TokenType::Enum) 0;
-    newRoot = state;
 }
 
 //=========================================================
@@ -283,14 +260,11 @@ void ReadToken(DfaState * startingState, const char * stream, Token & outToken) 
 
 //=========================================================
 void DeleteStateAndChildren (DfaState * root) {
-    DfaState * newRoot = nullptr;
-    InternalDeleteStateAndChildren(root, newRoot);
-
-    // see if we get back to the beginning of our pool
-    // could just zero memory...
-    s_stateIndex = newRoot - s_states;
-    assert(s_stateIndex == 0);
+    s_stateIndex = 0;
     s_keywordToId.clear();
+    s_edgeIndex = 0;
+    memset(s_states, 0, (MAX_STATES) * sizeof(DfaState));
+    memset(s_edges, 0,  MAX_EDGES * sizeof(DfaEdge));
 }
 
 //=========================================================
