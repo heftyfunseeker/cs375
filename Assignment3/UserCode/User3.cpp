@@ -1175,8 +1175,8 @@ std::unique_ptr<ExpressionNode> Parser::Expression5() {
 //=========================================================
 std::unique_ptr<ExpressionNode> Parser::Expression6() {
     PrintRule rule("Expression6");
-    unique_vector<UnaryOperatorNode> nodes;
-    int count = 0;
+    std::unique_ptr<UnaryOperatorNode> node;
+    UnaryOperatorNode* curr = nullptr;
     while (
         Accept(TokenType::Asterisk) ||
         Accept(TokenType::Ampersand) ||
@@ -1186,20 +1186,19 @@ std::unique_ptr<ExpressionNode> Parser::Expression6() {
         Accept(TokenType::Increment) ||
         Accept(TokenType::Decrement)
     ) {
-        auto nextUnaryNode = std::make_unique<UnaryOperatorNode>();
-        GetLastAcceptedToken(&nextUnaryNode->mOperator);
-        nodes.push_back(std::move(nextUnaryNode));
-        ++count;
-    }
-    if (count) {
-        UnaryOperatorNode* curr = nodes.back().get();
-        curr->mRight = Expression7();
-        curr = nodes.front().get();
-        for (int i = 1; i < count; ++i) {
-            curr->mRight = std::move(nodes[i]);
+        if (curr) {
+            curr->mRight = std::make_unique<UnaryOperatorNode>();
             curr = (UnaryOperatorNode*)curr->mRight.get();
         }
-        return rule.Accept(std::move(nodes.front()));
+        else {
+            node = std::make_unique<UnaryOperatorNode>();
+            curr = node.get();
+        }
+        GetLastAcceptedToken(&curr->mOperator);
+    }
+    if (curr) {
+        curr->mRight = Expression7();
+        return rule.Accept(std::move(node));
     }
     return rule.Accept(Expression7());
 }
