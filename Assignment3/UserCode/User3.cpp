@@ -212,7 +212,7 @@ public:
         }
         return Visitor::Stop;
     }
-    
+
     //=========================================================
     Visitor::Result Visit(ClassNode* node) {
         NodePrinter printer;
@@ -267,7 +267,7 @@ public:
         if (node->mScope) {
             node->mScope->Walk(this, false);
         }
-        
+
         if (node->mIterator) {
             node->mIterator->Walk(this, false);
         }
@@ -585,7 +585,7 @@ std::unique_ptr<BlockNode> Parser::Block () {
     PrintRule rule("Block");
     auto node = std::make_unique<BlockNode>();
     while (
-       (node->mGlobals.push_back(Function())) || 
+       (node->mGlobals.push_back(Function())) ||
        (node->mGlobals.push_back(Class())) ||
        (node->mGlobals.push_back(Var()) && Expect(TokenType::Semicolon))
     );
@@ -601,7 +601,7 @@ std::unique_ptr<ClassNode> Parser::Class () {
     auto node = std::make_unique<ClassNode>();
     Expect(TokenType::Identifier);
     GetLastAcceptedToken(&node->mName);
-    
+
     Expect(TokenType::OpenCurley);
     while (
         ((node->mMembers.push_back(Var()) && Expect(TokenType::Semicolon))) ||
@@ -618,10 +618,10 @@ std::unique_ptr<FunctionNode> Parser::Function () {
     if (Accept(TokenType::Function) == false) {
         return false;
     }
-    auto node = std::make_unique<FunctionNode>(); 
+    auto node = std::make_unique<FunctionNode>();
     Expect(TokenType::Identifier);
     GetLastAcceptedToken(&node->mName);
-    
+
     Expect(TokenType::OpenParentheses);
 
     if (node->mParameters.push_back(Parameter())) {
@@ -714,7 +714,7 @@ std::unique_ptr<TypeNode> Parser::NamedType () {
     if (curr) {
         curr->mPointerTo = std::move(node);
     }
-   
+
     if (Accept(TokenType::Ampersand)) {
         auto refNode = std::make_unique<ReferenceTypeNode>();
         if (pNode) {
@@ -1175,8 +1175,8 @@ std::unique_ptr<ExpressionNode> Parser::Expression5() {
 //=========================================================
 std::unique_ptr<ExpressionNode> Parser::Expression6() {
     PrintRule rule("Expression6");
-    std::unique_ptr<UnaryOperatorNode> node;
-    UnaryOperatorNode* curr = nullptr;
+    unique_vector<UnaryOperatorNode> nodes;
+    int count = 0;
     while (
         Accept(TokenType::Asterisk) ||
         Accept(TokenType::Ampersand) ||
@@ -1186,19 +1186,20 @@ std::unique_ptr<ExpressionNode> Parser::Expression6() {
         Accept(TokenType::Increment) ||
         Accept(TokenType::Decrement)
     ) {
-        if (curr) {
-            curr->mRight = std::make_unique<UnaryOperatorNode>();
+        auto nextUnaryNode = std::make_unique<UnaryOperatorNode>();
+        GetLastAcceptedToken(&nextUnaryNode->mOperator);
+        nodes.push_back(std::move(nextUnaryNode));
+        ++count;
+    }
+    if (count) {
+        UnaryOperatorNode* curr = nodes.back().get();
+        curr->mRight = Expression7();
+        curr = nodes.front().get();
+        for (int i = 1; i < count; ++i) {
+            curr->mRight = std::move(nodes[i]);
             curr = (UnaryOperatorNode*)curr->mRight.get();
         }
-        else {
-            node = std::make_unique<UnaryOperatorNode>();
-            curr = node.get();
-        }
-        GetLastAcceptedToken(&curr->mOperator);
-    }
-    if (curr) {
-        curr->mRight = Expression7();
-        return rule.Accept(std::move(node));
+        return rule.Accept(std::move(nodes.front()));
     }
     return rule.Accept(Expression7());
 }
@@ -1261,7 +1262,7 @@ std::unique_ptr<LiteralNode> Parser::Literal() {
         GetLastAcceptedToken(&node->mToken);
         return rule.Accept(std::move(node));
     }
-    return rule.Accept(nullptr);
+    return false;
 }
 
 //=========================================================
@@ -1273,7 +1274,7 @@ std::unique_ptr<NameReferenceNode> Parser::NameReference () {
         GetLastAcceptedToken(&node->mName);
         return rule.Accept(std::move(node));
     }
-    return rule.Accept(nullptr);
+    return false;
 }
 
 //=========================================================
